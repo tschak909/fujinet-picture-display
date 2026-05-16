@@ -21,6 +21,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
 	"html/template"
 	"image"
@@ -29,6 +31,7 @@ import (
 	_ "image/jpeg"
 	"image/png"
 	_ "image/png"
+	"io"
 	"log"
 	"math"
 	"net/http"
@@ -88,6 +91,172 @@ var (
 //	       + (y / 64)      × 0x0028
 func hgrOffset(y int) int {
 	return (y&7)*0x0400 + ((y>>3)&7)*0x0080 + (y>>6)*0x0028
+}
+
+// ── EXIF orientation ─────────────────────────────────────────────────────────
+
+// exifOrientation parses the EXIF orientation tag (0x0112) from raw JPEG
+// bytes without any external library.  Returns values 1-8 per the EXIF spec,
+// or 1 (normal) if the tag is absent or unreadable.
+//
+// JPEG APP1 layout:
+//   FF E1  <2-byte length>  "Exif\0\0"  <TIFF data>
+// TIFF IFD entry layout (per entry, 12 bytes):
+//   <2-byte tag>  <2-byte type>  <4-byte count>  <4-byte value-or-offset>
+func exifOrientation(data []byte) int {
+	// Bail immediately if this isn't a JPEG (magic bytes FF D8).
+	// Non-JPEG uploads (PNG, GIF, WebP) have no EXIF and may contain 0xFF
+	// bytes that would cause the segment loop to wander through the whole file.
+	if len(data) < 4 || data[0] != 0xFF || data[1] != 0xD8 {
+		return 1
+	}
+
+	// Walk JPEG segments looking for APP1 (marker 0xE1) with an Exif payload.
+	// Each segment: FF <marker> <2-byte length incl. the length field> <payload>
+	for i := 2; i+4 <= len(data); {
+		if data[i] != 0xFF {
+			// Not a valid segment start — corrupted or end of header area.
+			break
+		}
+		marker := data[i+1]
+		segLen := int(binary.BigEndian.Uint16(data[i+2 : i+4]))
+
+		// segLen includes its own 2 bytes; anything smaller is malformed.
+		if segLen < 2 {
+			break
+		}
+
+		// SOS (0xDA) marks the start of compressed image data — no more headers.
+		if marker == 0xDA {
+			break
+		}
+
+		payloadEnd := i + 2 + segLen // exclusive end of this segment in data
+		if payloadEnd > len(data) {
+			break // truncated file
+		}
+
+		if marker == 0xE1 {
+			// APP1: check for "Exif\0\0" header (6 bytes after the length field).
+			payload := data[i+4 : payloadEnd]
+			if len(payload) >= 6 && string(payload[:6]) == "Exif\x00\x00" {
+				return parseTIFFOrientation(payload[6:])
+			}
+		}
+
+		i = payloadEnd
+	}
+	return 1
+}
+
+// parseTIFFOrientation reads orientation from a raw TIFF block (little- or
+// big-endian).  Returns 1 if the tag is not found.
+func parseTIFFOrientation(b []byte) int {
+	if len(b) < 8 {
+		return 1
+	}
+	var order binary.ByteOrder
+	switch string(b[:2]) {
+	case "II":
+		order = binary.LittleEndian
+	case "MM":
+		order = binary.BigEndian
+	default:
+		return 1
+	}
+	// IFD offset is at bytes 4-7.
+	ifdOff := int(order.Uint32(b[4:8]))
+	if ifdOff+2 > len(b) {
+		return 1
+	}
+	nEntries := int(order.Uint16(b[ifdOff : ifdOff+2]))
+	for i := 0; i < nEntries; i++ {
+		entry := ifdOff + 2 + i*12
+		if entry+12 > len(b) {
+			break
+		}
+		tag := order.Uint16(b[entry : entry+2])
+		if tag == 0x0112 { // Orientation
+			return int(order.Uint16(b[entry+8 : entry+10]))
+		}
+	}
+	return 1
+}
+
+// applyOrientation rotates/flips img to match the EXIF orientation value.
+// The Apple II display is landscape, so portrait shots (orientations 5-8)
+// are rotated 90° clockwise to fill the 560×192 frame correctly.
+//
+// EXIF orientation values:
+//   1 = normal (top-left)      2 = flip horizontal
+//   3 = rotate 180°            4 = flip vertical
+//   5 = transpose              6 = rotate 90° CW   (phone portrait, held right)
+//   7 = transverse             8 = rotate 90° CCW  (phone portrait, held left)
+func applyOrientation(img image.Image, orient int) image.Image {
+	b := img.Bounds()
+	w, h := b.Max.X-b.Min.X, b.Max.Y-b.Min.Y
+
+	switch orient {
+	case 1:
+		return img // nothing to do
+	case 2: // flip horizontal
+		out := image.NewNRGBA(image.Rect(0, 0, w, h))
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				out.Set(w-1-x, y, img.At(b.Min.X+x, b.Min.Y+y))
+			}
+		}
+		return out
+	case 3: // rotate 180°
+		out := image.NewNRGBA(image.Rect(0, 0, w, h))
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				out.Set(w-1-x, h-1-y, img.At(b.Min.X+x, b.Min.Y+y))
+			}
+		}
+		return out
+	case 4: // flip vertical
+		out := image.NewNRGBA(image.Rect(0, 0, w, h))
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				out.Set(x, h-1-y, img.At(b.Min.X+x, b.Min.Y+y))
+			}
+		}
+		return out
+	case 5: // transpose (flip across top-left diagonal)
+		out := image.NewNRGBA(image.Rect(0, 0, h, w))
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				out.Set(y, x, img.At(b.Min.X+x, b.Min.Y+y))
+			}
+		}
+		return out
+	case 6: // rotate 90° CW (most common phone portrait)
+		out := image.NewNRGBA(image.Rect(0, 0, h, w))
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				out.Set(h-1-y, x, img.At(b.Min.X+x, b.Min.Y+y))
+			}
+		}
+		return out
+	case 7: // transverse (flip across top-right diagonal)
+		out := image.NewNRGBA(image.Rect(0, 0, h, w))
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				out.Set(h-1-y, w-1-x, img.At(b.Min.X+x, b.Min.Y+y))
+			}
+		}
+		return out
+	case 8: // rotate 90° CCW (phone portrait, held other way)
+		out := image.NewNRGBA(image.Rect(0, 0, h, w))
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				out.Set(y, w-1-x, img.At(b.Min.X+x, b.Min.Y+y))
+			}
+		}
+		return out
+	}
+	return img
 }
 
 // ── bilinear scaler ───────────────────────────────────────────────────────────
@@ -200,14 +369,17 @@ func convertToDHGR(src image.Image) (aux [dhgrAuxSz]byte, main [dhgrMainSz]byte)
 	// ── 1. Scale to 140×192 ───────────────────────────────────────────────
 	scaled := bilinearScale(src, dhgrCellW, dhgrH)
 
-	// ── 2. Convert to linear light, then Floyd-Steinberg dither ────────
+	// ── 2. Posterize: convert to linear light, apply shadow expansion,
+	// nearest-colour quantise — no dithering. ──────────────────────────────
 	//
-	// Dithering in linear light (not gamma-encoded sRGB) is critical for
-	// correct tonal reproduction.  In sRGB the midpoint between Dark Gray
-	// (sRGB 85) and Light Gray (sRGB 170) is at sRGB 127, but perceptually the
-	// midpoint is at sRGB ~139 (linear 0.255).  Converting to linear before
-	// matching widens the dark-gray capture zone by ~27%, and makes the
-	// error-diffusion steps proportional to perceived brightness differences.
+	// Dithering spreads quantisation error across adjacent cells, which looks
+	// noisy at DHGR’s coarse 4-pixel cell granularity.  A clean nearest-colour
+	// snap produces a bold, poster-like result that reads much better on the
+	// actual hardware at normal viewing distance.
+	//
+	// We still convert to linear light before matching so that the colour
+	// thresholds are perceptually correct, and retain the shadow-gamma
+	// expansion so dark areas don’t collapse to black.
 	type fRGB struct{ r, g, b float64 } // linear [0.0, 1.0]
 	buf := make([]fRGB, dhgrCellW*dhgrH)
 	for y := 0; y < dhgrH; y++ {
@@ -221,64 +393,48 @@ func convertToDHGR(src image.Image) (aux [dhgrAuxSz]byte, main [dhgrMainSz]byte)
 		}
 	}
 
-	// Shadow-contrast expansion: apply an additional power curve in linear
-	// space before quantisation.  Phone cameras lift shadows heavily with
-	// HDR/auto-exposure, so what looks "dark gray" in the scene arrives as
-	// sRGB 130â160 â above the stock DarkÂ Gray/LightÂ Gray threshold of sRGBÂ 136.
-	// Raising linear values to the power 1.2 shifts the effective threshold
-	// from sRGBÂ 136 to sRGBÂ 151, pulling that entire shadow band back to
-	// DarkÂ Gray and restoring lost contrast without distorting hues.
-	const shadowGamma = 1.2
+	// Brightness lift: exponent < 1 brightens in linear space.
+	// 0.75 lifts midtones by ~+25 sRGB units; pure white stays pinned at 1.0.
+	const brightnessGamma = 0.75
 	for i := range buf {
-		buf[i].r = math.Pow(buf[i].r, shadowGamma)
-		buf[i].g = math.Pow(buf[i].g, shadowGamma)
-		buf[i].b = math.Pow(buf[i].b, shadowGamma)
+		buf[i].r = math.Pow(buf[i].r, brightnessGamma)
+		buf[i].g = math.Pow(buf[i].g, brightnessGamma)
+		buf[i].b = math.Pow(buf[i].b, brightnessGamma)
+	}
+
+	// Saturation boost: pull each pixel's colour away from its luminance
+	// (BT.709 linear coefficients).  Pure greys are unaffected (chroma = 0);
+	// desaturated colours like skin tones, wood, foliage are pushed toward
+	// the nearest vivid palette entry instead of collapsing into grey.
+	// factor 2.5 doubles the colour separation without over-saturating.
+	const satBoost = 2.5
+	for i := range buf {
+		lum := 0.2126*buf[i].r + 0.7152*buf[i].g + 0.0722*buf[i].b
+		buf[i].r = lum + (buf[i].r-lum)*satBoost
+		buf[i].g = lum + (buf[i].g-lum)*satBoost
+		buf[i].b = lum + (buf[i].b-lum)*satBoost
 	}
 
 	clamp := func(v float64) float64 {
-		if v < 0 {
-			return 0
-		}
-		if v > 1 {
-			return 1
-		}
+		if v < 0 { return 0 }
+		if v > 1 { return 1 }
 		return v
 	}
 
+	// Simple nearest-colour snap — no error diffusion.
 	indices := make([]byte, dhgrCellW*dhgrH)
 	for y := 0; y < dhgrH; y++ {
 		for x := 0; x < dhgrCellW; x++ {
 			i := y*dhgrCellW + x
-			r := clamp(buf[i].r)
-			g := clamp(buf[i].g)
-			b := clamp(buf[i].b)
-
-			idx := nearestDHGR(r, g, b)
-			indices[i] = idx
-
-			// Quantisation error diffusion in linear-light space.
-			lc := linearPalette[idx]
-			er := r - lc[0]
-			eg := g - lc[1]
-			eb := b - lc[2]
-
-			spread := func(dx, dy int, w float64) {
-				nx, ny := x+dx, y+dy
-				if nx < 0 || nx >= dhgrCellW || ny < 0 || ny >= dhgrH {
-					return
-				}
-				j := ny*dhgrCellW + nx
-				buf[j].r += er * w
-				buf[j].g += eg * w
-				buf[j].b += eb * w
-			}
-			spread(1, 0, 7.0/16)
-			spread(-1, 1, 3.0/16)
-			spread(0, 1, 5.0/16)
-			spread(1, 1, 1.0/16)
+			indices[i] = nearestDHGR(
+				clamp(buf[i].r),
+				clamp(buf[i].g),
+				clamp(buf[i].b),
+			)
 		}
 	}
-		// ── 3. Pack colour indices into aux + main pages ──────────────────────
+
+			// ── 3. Pack colour indices into aux + main pages ──────────────────────
 	for y := 0; y < dhgrH; y++ {
 		off := hgrOffset(y)
 
@@ -660,13 +816,27 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	img, format, err := image.Decode(file)
+	// Read the entire upload into memory so we can (a) parse EXIF before
+	// the image decoder consumes the reader, and (b) decode the image.
+	rawBytes, err := io.ReadAll(file)
+	if err != nil {
+		http.Redirect(w, r, "/?flash=CANNOT+READ+UPLOAD&fc=err", http.StatusSeeOther)
+		return
+	}
+
+	// Extract EXIF orientation before decoding (decoder discards it).
+	orient := exifOrientation(rawBytes)
+	log.Printf("upload  file=%q  src=%s  exif_orientation=%d", hdr.Filename, r.RemoteAddr, orient)
+
+	img, format, err := image.Decode(bytes.NewReader(rawBytes))
 	if err != nil {
 		http.Redirect(w, r, "/?flash=CANNOT+DECODE+IMAGE&fc=err", http.StatusSeeOther)
 		return
 	}
-	log.Printf("upload  file=%q  format=%s  src=%s  bounds=%v",
-		hdr.Filename, format, r.RemoteAddr, img.Bounds())
+
+	// Apply EXIF orientation so portrait shots appear upright on the Apple II.
+	img = applyOrientation(img, orient)
+	log.Printf("decoded format=%s  bounds=%v  (after orientation correction)", format, img.Bounds())
 
 	aux, main := convertToDHGR(img)
 
