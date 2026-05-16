@@ -1,7 +1,7 @@
-PRODUCT = picture
+PRODUCT = photo
 #PLATFORMS += adam
 #PLATFORMS += adam_cpm
-PLATFORMS += apple2
+PLATFORMS += apple2enh
 #PLATFORMS += atari
 #PLATFORMS += c64
 #PLATFORMS += coco
@@ -17,8 +17,6 @@ PLATFORMS += apple2
 # SRC_DIRS may use the literal %PLATFORM% token.
 # It expands to the chosen PLATFORM plus any of its combos.
 SRC_DIRS = src src/%PLATFORM%
-
-LDFLAGS_EXTRA_APPLE2 = -C src/apple2-hgr.cfg
 
 # FUJINET_LIB can be
 # - a version number such as 4.7.6
@@ -54,3 +52,4 @@ include mekkogx/toplevel-rules.mk
 #   coco/r2r:: coco/custom-step2
 # or
 #   apple2/disk: apple2/custom-step1 apple2/custom-step2
+LDFLAGS_EXTRA_APPLE2ENH = -C src/apple2enh-hgr.cfg
