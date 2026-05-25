@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>MSX PICTURE BOOTH</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+  <style>
+    /* ── V9938 default palette variables ────────────────────── */
+    :root {
+      --c02: #3EB849;
+      --c03: #74D07D;
+      --c04: #5955E0;
+      --c05: #8076F1;
+      --c06: #B95E51;
+      --c07: #65DBEF;
+      --c08: #DB6559;
+      --c09: #FF897D;
+      --c10: #CCC35E;
+      --c11: #DED087;
+      --c13: #B766B5;
+      --c14: #CCCCCC;
+      --c15: #FFFFFF;
+      --px:  'Press Start 2P', monospace;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html { height: 100%; }
+
+    body {
+      font-family: 'Courier New', Courier, monospace;
+      background: #000018;
+      color: var(--c03);
+      min-height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 16px 12px 56px;
+      gap: 14px;
+      overflow-x: hidden;
+    }
+
+    /* CRT scanlines overlay */
+    body::after {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background: repeating-linear-gradient(
+        0deg,
+        transparent 0px,
+        transparent 3px,
+        rgba(0, 0, 0, 0.18) 3px,
+        rgba(0, 0, 0, 0.18) 4px
+      );
+      pointer-events: none;
+      z-index: 9998;
+    }
+
+    /* ── MSX logo ────────────────────────────────────────────── */
+    .msx-logo {
+      font-family: var(--px);
+      font-size: clamp(1.4rem, 8vw, 2.4rem);
+      line-height: 1;
+      letter-spacing: 0.12em;
+      margin-bottom: 6px;
+    }
+    .msx-logo .lm { color: var(--c05); text-shadow: 0 0 14px var(--c05); }
+    .msx-logo .ls { color: var(--c09); text-shadow: 0 0 14px var(--c09); }
+    .msx-logo .lx { color: var(--c03); text-shadow: 0 0 14px var(--c03); }
+
+    /* ── Boot header ─────────────────────────────────────────── */
+    .boot-header {
+      width: 100%;
+      max-width: 560px;
+      border: 1px solid var(--c02);
+      padding: 14px 16px 12px;
+      background: #00001e;
+      position: relative;
+    }
+
+    .boot-header::before {
+      content: '';
+      position: absolute;
+      inset: 3px;
+      border: 1px solid #1a1a40;
+      pointer-events: none;
+    }
+
+    .boot-title {
+      font-family: var(--px);
+      font-size: clamp(0.45rem, 2.5vw, 0.65rem);
+      color: var(--c15);
+      letter-spacing: 0.06em;
+      margin-bottom: 4px;
+      text-shadow: 0 0 8px var(--c15);
+    }
+
+    .boot-copy {
+      font-size: 0.72rem;
+      color: #445;
+      margin-top: 6px;
+    }
+
+    .boot-ok {
+      font-size: 0.75rem;
+      color: var(--c02);
+      margin-top: 8px;
+    }
+
+    /* ── Drop / upload zone ──────────────────────────────────── */
+    .drop-zone {
+      width: 100%;
+      max-width: 560px;
+      border: 2px solid var(--c02);
+      background: #00001a;
+      padding: 28px 16px;
+      text-align: center;
+      cursor: pointer;
+      position: relative;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+      transition: background 0.1s, border-color 0.1s;
+    }
+
+    .drop-zone::before, .drop-zone::after {
+      content: '▮';
+      position: absolute;
+      font-size: 0.6rem;
+      color: var(--c02);
+      line-height: 1;
+    }
+    .drop-zone::before { top: 4px; left: 6px; }
+    .drop-zone::after  { bottom: 4px; right: 6px; }
+
+    .drop-zone:hover, .drop-zone.over, .drop-zone:focus-visible {
+      background: #001800;
+      border-color: var(--c03);
+      outline: none;
+    }
+
+    .dz-prompt {
+      font-family: var(--px);
+      font-size: clamp(0.5rem, 3vw, 0.7rem);
+      color: var(--c11);
+      margin-bottom: 10px;
+      letter-spacing: 0.06em;
+    }
+
+    .dz-prompt::before {
+      content: '▶ ';
+      color: var(--c02);
+    }
+
+    .dz-label {
+      font-family: var(--px);
+      font-size: clamp(0.6rem, 4vw, 0.9rem);
+      color: var(--c03);
+      letter-spacing: 0.04em;
+      text-shadow: 0 0 10px var(--c03);
+      margin-bottom: 8px;
+    }
+
+    .dz-cursor {
+      display: inline-block;
+      width: 0.65em;
+      height: 1em;
+      background: var(--c03);
+      vertical-align: bottom;
+      animation: blink 0.85s step-end infinite;
+      margin-left: 2px;
+    }
+
+    @keyframes blink { 50% { opacity: 0; } }
+
+    .dz-hint {
+      font-size: 0.7rem;
+      color: #445;
+    }
+
+    input[type="file"] { display: none; }
+
+    /* ── BASIC-style output line ─────────────────────────────── */
+    .basic-out {
+      width: 100%;
+      max-width: 560px;
+      font-size: 0.8rem;
+      min-height: 2.4em;
+      padding: 4px 0 2px;
+      border-bottom: 1px solid #1a1a40;
+    }
+
+    .basic-out .prefix {
+      font-family: var(--px);
+      font-size: 0.5rem;
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    .basic-out.ok    .prefix { color: var(--c02); }
+    .basic-out.busy  .prefix { color: var(--c11); }
+    .basic-out.err   .prefix { color: var(--c09); }
+
+    .basic-out.ok   { color: var(--c03); }
+    .basic-out.busy { color: var(--c11); }
+    .basic-out.err  { color: var(--c09); }
+
+    /* ── Preview windows ─────────────────────────────────────── */
+    .previews {
+      width: 100%;
+      max-width: 560px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .pwin {
+      border: 1px solid var(--c02);
+      background: #000;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .pwin-title {
+      font-family: var(--px);
+      font-size: 0.4rem;
+      letter-spacing: 0.05em;
+      padding: 5px 6px 4px;
+      background: var(--c02);
+      color: #000;
+      text-transform: uppercase;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: clip;
+    }
+
+    .pwin img {
+      width: 100%;
+      display: block;
+      image-rendering: pixelated;
+      flex: 1;
+    }
+
+    .pwin .ph {
+      min-height: 90px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.65rem;
+      color: #334;
+      flex: 1;
+      padding: 8px;
+      text-align: center;
+    }
+
+    /* ── Endpoint info block ─────────────────────────────────── */
+    .endpoint-info {
+      width: 100%;
+      max-width: 560px;
+      border: 1px solid #1a1a40;
+      padding: 10px 12px;
+      font-size: 0.7rem;
+      color: #445;
+      line-height: 1.9;
+    }
+
+    .endpoint-info .ei-head {
+      font-family: var(--px);
+      font-size: 0.45rem;
+      color: var(--c07);
+      margin-bottom: 8px;
+      letter-spacing: 0.06em;
+      text-shadow: 0 0 8px var(--c07);
+    }
+
+    .ep { color: var(--c03); font-family: 'Courier New', monospace; }
+    .em { color: var(--c14); }
+
+    /* ── Fixed function-key bar ──────────────────────────────── */
+    .fkbar {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      display: flex;
+      z-index: 100;
+    }
+
+    .fk {
+      flex: 1;
+      font-family: var(--px);
+      font-size: clamp(0.3rem, 1.8vw, 0.45rem);
+      padding: 6px 2px 5px;
+      text-align: center;
+      letter-spacing: 0.03em;
+      line-height: 1.4;
+      user-select: none;
+    }
+
+    .fk1 { background: #0e0e2e; color: var(--c05); border-top: 2px solid var(--c04); }
+    .fk2 { background: #0a200a; color: var(--c03); border-top: 2px solid var(--c02); }
+    .fk3 { background: #200a0a; color: var(--c09); border-top: 2px solid var(--c08); }
+    .fk4 { background: #062020; color: var(--c07); border-top: 2px solid var(--c07); }
+    .fk5 { background: #1e1a00; color: var(--c11); border-top: 2px solid var(--c10); }
+
+    .fk-num { display: block; opacity: 0.6; }
+    .fk-lbl { display: block; }
+  </style>
+</head>
+<body>
+
+<!-- Boot header -->
+<div class="boot-header">
+  <div class="msx-logo"><span class="lm">M</span><span class="ls">S</span><span class="lx">X</span></div>
+  <div class="boot-title">PICTURE BOOTH V1.0</div>
+  <div class="boot-copy">FUJINET RETROCOMPUTING DEMO &mdash; V9938 SCREEN 7 (512&times;212, 16-COLOR)</div>
+  <div class="boot-ok">Ok</div>
+</div>
+
+<!-- Upload / input zone -->
+<div class="drop-zone" id="dropZone" role="button" tabindex="0" aria-label="Select or drop a photo">
+  <div class="dz-prompt">LOAD "PHOTO.BIN"</div>
+  <div class="dz-label">TAP TO TAKE PHOTO<span class="dz-cursor"></span></div>
+  <div class="dz-hint">or drag &amp; drop an image here</div>
+  <input type="file" id="fileInput" accept="image/*" capture="environment">
+</div>
+
+<!-- BASIC-style status output -->
+<div class="basic-out idle" id="statusOut">
+  <span class="prefix" id="statusPrefix">Ok</span>
+  <span id="statusMsg">Waiting for photo&hellip;</span>
+</div>
+
+<!-- Preview windows -->
+<div class="previews">
+  <div class="pwin">
+    <div class="pwin-title">ORIGINAL</div>
+    <div class="ph" id="origPH">NO IMAGE</div>
+    <img id="origImg" src="" alt="Original" style="display:none">
+  </div>
+  <div class="pwin">
+    <div class="pwin-title">V9938 SCREEN 7</div>
+    <div class="ph" id="v9938PH">AWAITING</div>
+    <img id="v9938Img" src="" alt="V9938 output" style="display:none">
+  </div>
+</div>
+
+<!-- Endpoint reference -->
+<div class="endpoint-info">
+  <div class="ei-head">FUJINET CLIENT ENDPOINTS</div>
+  <span class="ep">GET /timestamp</span> <span class="em">&rarr; unix timestamp</span><br>
+  <span class="ep">GET /get</span>       <span class="em">&rarr; 54304 bytes raw binary</span><br>
+  <span class="em">&nbsp;&nbsp;0-31 palette (16&times;2B)&nbsp;&nbsp;32+ bitmap (512&times;212, 4bpp)</span>
+</div>
+
+<!-- Fixed MSX function key bar -->
+<div class="fkbar">
+  <div class="fk fk1"><span class="fk-num">F1</span><span class="fk-lbl">UPLOAD</span></div>
+  <div class="fk fk2"><span class="fk-num">F2</span><span class="fk-lbl">GET</span></div>
+  <div class="fk fk3"><span class="fk-num">F3</span><span class="fk-lbl">PREVIEW</span></div>
+  <div class="fk fk4"><span class="fk-num">F4</span><span class="fk-lbl">STAMP</span></div>
+  <div class="fk fk5"><span class="fk-num">F5</span><span class="fk-lbl">RESET</span></div>
+</div>
+
+<script>
+  const dropZone  = document.getElementById('dropZone');
+  const fileInput = document.getElementById('fileInput');
+  const statusOut = document.getElementById('statusOut');
+  const statusPfx = document.getElementById('statusPrefix');
+  const statusMsg = document.getElementById('statusMsg');
+  const origImg   = document.getElementById('origImg');
+  const v9938Img  = document.getElementById('v9938Img');
+  const origPH    = document.getElementById('origPH');
+  const v9938PH   = document.getElementById('v9938PH');
+
+  dropZone.addEventListener('click', () => fileInput.click());
+  dropZone.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); }
+  });
+
+  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('over'); });
+  ['dragleave', 'dragend'].forEach(ev =>
+    dropZone.addEventListener(ev, () => dropZone.classList.remove('over')));
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault();
+    dropZone.classList.remove('over');
+    const f = e.dataTransfer?.files?.[0];
+    if (f && f.type.startsWith('image/')) uploadFile(f);
+  });
+
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files?.[0]) uploadFile(fileInput.files[0]);
+    fileInput.value = '';
+  });
+
+  function setStatus(msg, state) {
+    const prefixes = { idle: 'Ok', ok: 'Ok', busy: 'RUN', err: '?Error' };
+    statusPfx.textContent = prefixes[state] ?? 'Ok';
+    statusMsg.textContent = msg;
+    statusOut.className = 'basic-out ' + (state || 'idle');
+  }
+
+  function showOrig(file) {
+    const reader = new FileReader();
+    reader.onload = e => {
+      origImg.src = e.target.result;
+      origImg.style.display = 'block';
+      origPH.style.display = 'none';
+    };
+    reader.readAsDataURL(file);
+  }
+
+  async function uploadFile(file) {
+    showOrig(file);
+    v9938Img.style.display = 'none';
+    v9938PH.style.display  = 'flex';
+    v9938PH.textContent    = 'CONVERTING...';
+    setStatus('Converting to V9938 Screen 7 format...', 'busy');
+
+    const form = new FormData();
+    form.append('image', file);
+
+    try {
+      const res = await fetch('/upload', { method: 'POST', body: form });
+      if (!res.ok) throw new Error((await res.text()) || res.statusText);
+
+      setStatus('Conversion complete. Loading preview...', 'busy');
+      v9938PH.textContent = 'LOADING...';
+
+      const img = new Image();
+      img.onload = () => {
+        v9938Img.src = img.src;
+        v9938Img.style.display = 'block';
+        v9938PH.style.display  = 'none';
+        setStatus('Ready. Retro clients can fetch /get', 'ok');
+      };
+      img.onerror = () => {
+        v9938PH.textContent = 'NO PREVIEW';
+        setStatus('Converted. Preview unavailable.', 'ok');
+      };
+      img.src = '/preview?' + Date.now();
+
+    } catch (err) {
+      setStatus(err.message, 'err');
+      v9938PH.textContent = 'ERROR';
+    }
+  }
+</script>
+</body>
+</html>
